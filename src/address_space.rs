@@ -157,7 +157,7 @@ impl<'c> AddressSpace<'c> {
         &self,
         addr: VirtualAddress,
         access_type: FlagBuilder,
-    ) -> Result<(Arc<dyn DataSource>, usize), &str> {
+    ) -> Result<(Arc<dyn DataSource + 'c>, usize), &str> {
         for mapping in &self.mappings {
             if mapping.addr == addr {
                 // if access_type not one of the flags in mapping.flags. Err

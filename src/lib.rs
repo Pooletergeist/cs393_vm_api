@@ -4,11 +4,13 @@ mod address_space;
 mod cacher;
 mod data_source;
 
-pub use address_space::AddressSpace;
+pub use address_space::{AddressSpace, FlagBuilder};
 pub use data_source::{DataSource, FileDataSource};
 
 #[cfg(test)]
 mod tests {
+
+    use std::sync::Arc;
     use super::*;
 
     #[test]
@@ -23,12 +25,14 @@ mod tests {
     // test if mapping has been added
     #[test]
     fn test_add_mapping() {
-        let addr_space = AddressSpace::new("Test address space");
+        let mut addr_space = AddressSpace::new("Test address space");
         let data_source: FileDataSource = FileDataSource::new("Cargo.toml").unwrap();
         let offset: usize = 0;
         let length: usize = 1;
+        let flag: FlagBuilder = FlagBuilder::new();
+        let arc_ds = Arc::new(data_source);
 
-        let addr = addr_space.add_mapping(&data_source, offset, length).unwrap();
+        let addr = addr_space.add_mapping(arc_ds.clone(), offset, length, flag).unwrap();
         assert!(addr != 0);
 
         // we should move these tests into addr_space, since they access non-public internals of the structure:
