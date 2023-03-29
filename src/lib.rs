@@ -11,6 +11,8 @@ use std::sync::Arc; // <- will have to make Arc ourselves for #no_std
 
 #[cfg(test)]
 mod tests {
+
+    use std::sync::Arc;
     use super::*;
 
     #[test]
@@ -29,13 +31,10 @@ mod tests {
         let data_source: FileDataSource = FileDataSource::new("Cargo.toml").unwrap();
         let offset: usize = 0;
         let length: usize = 1;
-        let read_flags = FlagBuilder::new().toggle_read();
+        let flag: FlagBuilder = FlagBuilder::new();
+        let arc_ds = Arc::new(data_source);
 
-        let ds_arc = Arc::new(data_source);
-
-        let addr = addr_space
-            .add_mapping(ds_arc.clone(), offset, length, read_flags)
-            .unwrap();
+        let addr = addr_space.add_mapping(arc_ds.clone(), offset, length, flag).unwrap();
         assert!(addr != 0);
 
         let addr2 = addr_space

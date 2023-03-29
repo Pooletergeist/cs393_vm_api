@@ -3,21 +3,21 @@ use std::sync::Arc;
 use crate::data_source::DataSource;
 
 pub const PAGE_SIZE: usize = 4096;
-pub const VADDR_MAX: usize = (1 << 38) - 1;
+pub const VADDR_MAX: usize = (1 << 38) - 1; // 2^39 is RISC target. 2^27-1 VA's. Each VA is 9 * 3 VPN bit offsets, and 12 page offset bits..*
 
 type VirtualAddress = usize;
 
-struct MapEntry {
-    source: Arc<dyn DataSource>,
+struct MapEntry<'a> {
+    source: Arc<dyn DataSource + 'a>,
     offset: usize,
     span: usize,
     addr: usize,
     flags: FlagBuilder
 }
 
-impl MapEntry {
+impl<'a> MapEntry<'a> {
     #[must_use] // <- not using return value of "new" doesn't make sense, so warn
-    pub fn new(source: Arc<dyn DataSource>, offset: usize, span: usize, addr: usize, flags: FlagBuilder) -> MapEntry {
+    pub fn new(source: Arc<dyn DataSource + 'a>, offset: usize, span: usize, addr: usize, flags: FlagBuilder) -> MapEntry<'a> {
         MapEntry {
             source: source.clone(),
             offset,
@@ -28,10 +28,11 @@ impl MapEntry {
     }
 }
 
-/// An address space.
-pub struct AddressSpace {
+
+/// An address space. Can't live longer than the MapEntries in it?
+pub struct AddressSpace<'b>{
     name: String,
-    mappings: Vec<MapEntry>, // see below for comments
+    mappings: Vec<MapEntry<'b>>, // see below for comments
 }
 
 // comments about storing mappings
@@ -45,7 +46,7 @@ pub struct AddressSpace {
 // from a crate (but remember it needs to be #no_std compatible), or even write your own.
 // See this ticket from Riley: https://github.com/dylanmc/cs393_vm_api/issues/10
 
-impl AddressSpace {
+impl<'c> AddressSpace<'c> {
     #[must_use]
     pub fn new(name: &str) -> Self {
         Self {
@@ -59,30 +60,38 @@ impl AddressSpace {
     /// # Errors
     /// If the desired mapping is invalid.
     /// TODO: how does our test in lib.rs succeed?
+    /// ANSWER: The test in lib.rs makes two mapppings — one at addr 0 of span 1, the other at addr PAGE_SIZE with span 0.
+    /// The test asserts that the first mapping doesn't return 0, which is true because we return addr_iter + PAGE_SIZE, 
+    /// which = 2*PAGE_SIZE when offset is 0 and span is 1. The second mapping 
     // pub fn add_mapping<'a, D: DataSource + 'a>(
     //     &'a mut self,
-    pub fn add_mapping<D: DataSource + 'static>(
+    pub fn add_mapping<D: DataSource + 'c>(
         &mut self,
         source: Arc<D>,
         offset: usize,
         span: usize,
         flags: FlagBuilder,
     ) -> Result<VirtualAddress, &str> {
-        let mut addr_iter = PAGE_SIZE; // let's not map page 0
+        let mut addr_iter = PAGE_SIZE; // let's not map page 0. addr_iter our running placeholder for where there might be space in the memory.
         let mut gap;
-        for mapping in &self.mappings {
-            gap = mapping.addr - addr_iter;
-            if gap > span + 2 * PAGE_SIZE {
+        for mapping in &self.mappings { // look to the next mapping
+            gap = mapping.addr - addr_iter; // difference between next mapping & current empty space
+            if gap > span + 2 * PAGE_SIZE { // can fit this mapping (span) with empty page each side
                 break;
             }
-            addr_iter = mapping.addr + mapping.span;
+            addr_iter = mapping.addr + mapping.span; // couldn't fit between current guess and this mapping, try next guess at the end of this mapping
+            // ROUND UP TO THE NEAREST PAGE
+            if addr_iter % PAGE_SIZE != 0 {
+                let multiples: usize = addr_iter / PAGE_SIZE;
+                addr_iter = (multiples + 1) * PAGE_SIZE;
+            }
         }
-        if addr_iter + span + 2 * PAGE_SIZE < VADDR_MAX {
-            let mapping_addr = addr_iter + PAGE_SIZE;
-            let new_mapping = MapEntry::new(source, offset, span, mapping_addr, flags);
-            self.mappings.push(new_mapping);
-            self.mappings.sort_by(|a, b| a.addr.cmp(&b.addr));
-            return Ok(mapping_addr);
+        if addr_iter + span + 2 * PAGE_SIZE < VADDR_MAX { // 1 blank page on either side. Span for how much this mapping needs. addr_iter for where it can go
+            let mapping_addr = addr_iter + PAGE_SIZE; // 1 blank page before.
+            let new_mapping: MapEntry = MapEntry::new(source, offset, span, mapping_addr, flags);
+            self.mappings.push(new_mapping); // add new mapping to end
+            self.mappings.sort_by(|a, b| a.addr.cmp(&b.addr)); // put it in order of addresses
+            return Ok(mapping_addr); // no error, result type of usize (called VirtualAddress)
         }
         Err("out of address space!")
     }
@@ -91,7 +100,7 @@ impl AddressSpace {
     ///
     /// # Errors
     /// If there is insufficient room subsequent to `start`.
-    pub fn add_mapping_at<D: DataSource + 'static>(
+    pub fn add_mapping_at<D: DataSource + 'c>(
         &mut self,
         source: Arc<D>,
         offset: usize,
@@ -99,7 +108,23 @@ impl AddressSpace {
         start: VirtualAddress,
         flags: FlagBuilder
     ) -> Result<(), &str> {
-        todo!()
+        // check whether there's space for mapping
+        let mut next_mapping: usize = 0;
+        for mapping in &self.mappings {
+            next_mapping = mapping.addr;
+            if next_mapping > start {
+                break;
+            }
+        }
+        if start + span + 2*PAGE_SIZE < next_mapping {  // there's space! 
+            let new_mapping: MapEntry = MapEntry::new(source, offset, span, start, flags);
+            self.mappings.push(new_mapping); // add new mapping to end
+            self.mappings.sort_by(|a, b| a.addr.cmp(&b.addr)); // put it in order of addresses
+            Ok(())
+        } else {
+            Err("Not enough space after 'start' to map here.")
+        }
+
     }
 
     /// Remove the mapping to `DataSource` that starts at the given address.
@@ -107,14 +132,21 @@ impl AddressSpace {
     /// # Errors
     /// If the mapping could not be removed.
     pub fn remove_mapping<D: DataSource>(
-        &self,
+        &mut self,
         source: Arc<D>,
         start: VirtualAddress,
     ) -> Result<(), &str> {
-        todo!()
+        // iterate through mappings, find the given address? remove that mapping?
+        for (mapping_num,mapping) in (&self.mappings).iter().enumerate() {
+            if mapping.addr == start {
+                self.mappings.remove(mapping_num);
+                return Ok(());
+            }
+        }
+        Err("no mapping found starting at that address.")
     }
 
-    /// Look up the DataSource and offset within that DataSource for a
+    /// Look up the DataSource and offset within that DataSource by a
     /// VirtualAddress / AccessType in this AddressSpace
     ///
     /// # Errors
@@ -124,13 +156,33 @@ impl AddressSpace {
         &self,
         addr: VirtualAddress,
         access_type: FlagBuilder,
-    ) -> Result<(Arc<D>, usize), &str> {
-        todo!();
+    ) -> Result<(Arc<dyn DataSource + 'c>, usize), &str> {
+        for mapping in &self.mappings {
+            if mapping.addr == addr {
+                // if access_type not one of the flags in mapping.flags. Err
+                if mapping.flags.check_access_perms(access_type) {
+                    return Ok((mapping.source.clone(), mapping.offset)); // lifetime bug! why does returning a cloned &MapEntry require Address Space to outlive static?
+                    // PROBLEM: Address Space, with lifetime 'a, serves a public function that returns an Arc to a Data Source
+                    // Rust is worried that returning the Arc to the Data Source will create a dangling reference.
+                    // dangling reference or double de-allocate?
+                    // CURRENT LIFETIME BOUNDS:
+                    // Map Entry cannot outlive internal Data Source
+                    // Address Space cannot outlive internal Map Entries
+                    // why then it is a problem for a data source to outlive address space?
+                }
+            }
+        }
+        todo!()
     }
 
-    /// Helper function for looking up mappings
-    fn get_mapping_for_addr(&self, addr: VirtualAddress) -> Result<MapEntry, &str> {
-        todo!();
+    /// Helper function for looking up mappings - I don't use...
+    fn get_mapping_for_addr(&self, addr: VirtualAddress) -> Result<&MapEntry, &str> {
+        for (mapping_num, mapping) in (&self.mappings).iter().enumerate() {
+            if mapping_num == addr {
+                return Ok(mapping)
+            }
+        }
+        Err("no mapping found at that address")
     }
 }
 
